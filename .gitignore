@@ -1,0 +1,13 @@
+# Local tool caches — not part of the app
+.wrangler/
+.netlify/
+node_modules/
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+
+# Deploy bundles
+*.zip
