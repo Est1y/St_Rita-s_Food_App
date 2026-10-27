@@ -1,5 +1,5 @@
 /* St. Rita's Foodz — offline service worker (network-first, cache fallback) */
-const CACHE = 'srf-cache-v5';
+const CACHE = 'srf-cache-v6';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {

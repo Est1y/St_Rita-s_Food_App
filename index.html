@@ -376,7 +376,15 @@ function bannerFallback(){
 }
 
 /* ===== TYPE OF SALES ===== */
-const NOTE_OPTS = ['Main cash','Pure water','Jinja','Iru Soap','Drink','POS','Transfer sales'];
+const NOTE_OPTS = ['Main cash','Pure water','Jinja','Iru Soap','Drink','POS','Transfer sales','Home purchase'];
+/* lists saved before 'Home purchase' existed get it added once; removing it in settings afterwards sticks */
+function upgradeNoteOpts(st){
+  if(st.homeOptAdded) return;
+  if(st.noteOpts.indexOf('Home purchase')<0) st.noteOpts.push('Home purchase');
+  st.homeOptAdded=true;
+}
+/* ===== AIRTIME ===== */
+const AIRTIME_PLATFORMS = ['Moniepoint','Opay'];
 /* sale types that attract a bank/POS charge */
 function isChargeable(n){ n=(n||'').toLowerCase(); return n==='pos' || n.indexOf('transfer')>-1; }
 /* sale types that draw down a stock item, and the item name each one maps to.
@@ -430,6 +438,7 @@ function load(){
     store.settings.noteOpts=NOTE_OPTS.slice();
     if(store.settings.lastNote==='Drink POS') store.settings.lastNote='POS';
   }
+  upgradeNoteOpts(store.settings);
   if(store.settings.lastNote==null) store.settings.lastNote='';
   // persist under v2 so migration only happens once
   saveS(); saveB(); saveE(); saveSet();
@@ -468,6 +477,7 @@ function reloadStore(){
     store.settings.noteOpts=NOTE_OPTS.slice();
     if(store.settings.lastNote==='Drink POS') store.settings.lastNote='POS';
   }
+  upgradeNoteOpts(store.settings);
   if(store.settings.lastNote==null)store.settings.lastNote='';
   const bn=document.getElementById('bizName'); if(bn)bn.textContent=store.settings.biz;
 }
@@ -514,6 +524,65 @@ function stockLabel(p){
 /* plain number for table cells (₦ noted once in the table footer) */
 function plain(n){ return (Number(n)||0).toLocaleString('en-NG',{maximumFractionDigits:2}); }
 function timeOf(ts){ return ts?new Date(ts).toLocaleTimeString('en-NG',{hour:'numeric',minute:'2-digit'}):''; }
+function csvOf(rows){ return rows.map(function(r){ return r.map(function(c){ c=(c==null?'':''+c); return /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c; }).join(','); }).join('\n'); }
+/* ----- printing: a plain black-on-white page in a hidden frame, so the app itself is not printed ----- */
+function printTable(head, rows, foot){
+  const cell=function(tag,c){ return '<'+tag+(typeof c==='number'?' class="n"':'')+'>'+(typeof c==='number'?plain(c):esc(c==null?'':''+c))+'</'+tag+'>'; };
+  return '<table><thead><tr>'+head.map(function(h){ return '<th>'+esc(h)+'</th>'; }).join('')+'</tr></thead>'
+    +'<tbody>'+rows.map(function(r){ return '<tr>'+r.map(function(c){ return cell('td',c); }).join('')+'</tr>'; }).join('')+'</tbody>'
+    +(foot?'<tfoot><tr>'+foot.map(function(c){ return cell('td',c); }).join('')+'</tr></tfoot>':'')+'</table>';
+}
+function printDoc(title, inner){
+  const old=document.getElementById('printFrame'); if(old) old.remove();
+  const f=document.createElement('iframe'); f.id='printFrame';
+  f.style.cssText='position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+  document.body.appendChild(f);
+  const d=f.contentWindow.document;
+  d.open();
+  d.write('<!doctype html><html><head><meta charset="utf-8"><title>'+esc(title)+'</title><style>'
+    +'body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#000;margin:18px;font-size:12px}'
+    +'h1{font-size:17px;margin:0 0 2px}h2{font-size:13.5px;margin:18px 0 6px}.sub{color:#555;margin:0 0 12px}'
+    +'table{width:100%;border-collapse:collapse}th,td{border:1px solid #bbb;padding:5px 7px;text-align:left;vertical-align:top}'
+    +'th{background:#eee;font-size:11px;text-transform:uppercase}td.n{text-align:right;white-space:nowrap}tfoot td{font-weight:700;background:#f6f6f6}'
+    +'</style></head><body><h1>'+esc(store.settings.biz)+' — '+esc(title)+'</h1>'
+    +'<div class="sub">Printed '+esc(niceDate(today()))+' at '+esc(timeOf(Date.now()))+' · amounts in ₦</div>'+inner+'</body></html>');
+  d.close();
+  setTimeout(function(){
+    try{ f.contentWindow.focus(); f.contentWindow.print(); }
+    catch(e){ toast('Printing is not available here — use Export instead','bad'); }
+  },300);
+}
+/* ----- expiry dates ----- */
+function addMonths(iso,n){ const [y,m,d]=iso.split('-').map(Number); return dstr(new Date(y,m-1+n,d)); }
+function daysUntil(iso){ const [y,m,d]=iso.split('-').map(Number); const t=new Date(); t.setHours(0,0,0,0); return Math.round((new Date(y,m-1,d)-t)/86400000); }
+function expiryText(iso){
+  const n=daysUntil(iso);
+  if(n<0) return 'expired '+(-n)+' day'+(n!==-1?'s':'')+' ago';
+  if(n===0) return 'expires today';
+  return 'expires in '+n+' day'+(n!==1?'s':'');
+}
+const EXPIRY_WARN_MONTHS=3;
+/* stock-in rows whose goods expire within 3 months (or already have), and are still on the shelf */
+function expiringSoon(){
+  const limit=addMonths(today(), EXPIRY_WARN_MONTHS);
+  return store.purchases.filter(function(p){
+    if(!p.expiry || p.expiryDone || isAdjust(p) || p.expiry>limit) return false;
+    const it=p.itemId?store.products.find(function(x){ return x.id===p.itemId; }):null;
+    return !it || it.qp>0 || it.qc>0;
+  }).sort(function(a,b){ return a.expiry.localeCompare(b.expiry); });
+}
+function dismissExpiry(id){
+  const p=store.purchases.find(function(x){ return x.id===id; }); if(!p) return;
+  askConfirm('Stop reminding about '+(p.itemName||'this stock')+' ('+expiryText(p.expiry)+')?\nDo this once the goods are sold, returned or thrown away.', function(){
+    p.expiryDone=true; saveB(); rerender(); toast('Reminder cleared','good');
+  }, 'Clear reminder');
+}
+/* nearest upcoming expiry recorded for an item, '' if none */
+function itemExpiry(p){
+  const ex=store.purchases.filter(function(b){ return b.itemId===p.id && b.expiry && !b.expiryDone; })
+    .map(function(b){ return b.expiry; }).sort();
+  return ex[0]||'';
+}
 /* ----- last supplier used: kept outside settings so it never lands on the undo stack ----- */
 function lastSupplier(){
   try{
@@ -570,6 +639,16 @@ function renderHome(){
   acts.sort((a,b)=>b.ts-a.ts); const recent=acts.slice(0,6);
 
   const low=lowStock();
+  const expiring=expiringSoon();
+  const expHTML=expiring.length?`
+    <div class="section-head" style="margin-top:0"><h3>⚠ Expiring within ${EXPIRY_WARN_MONTHS} months</h3><small class="muted">${expiring.length} batch${expiring.length!==1?'es':''}</small></div>
+    <div class="card restock" style="margin-bottom:14px">
+      ${expiring.slice(0,8).map(p=>{ const n=daysUntil(p.expiry); return `<div class="row"><div class="ico ${n<=30?'exp':'buy'}">⌛</div>
+        <div class="body"><div class="t">${esc(p.itemName||p.desc||'Stock')}</div>
+          <div class="s">${niceDate(p.expiry)} · ${expiryText(p.expiry)}${p.qty>0?' · bought '+p.qty+' '+(p.unit||'pcs'):''}</div></div>
+        <button class="cedit" title="Clear this reminder" onclick="dismissExpiry('${p.id}')">✓</button></div>`; }).join('')}
+      ${expiring.length>8?`<div class="empty" style="padding:10px">+${expiring.length-8} more</div>`:''}
+    </div>`:'';
 
   document.getElementById('v-home').innerHTML=`
     <div class="eyebrow">Today · ${niceDate(iso)}</div>
@@ -586,6 +665,7 @@ function renderHome(){
       <div class="stat"><div class="k">Stock value (selling)</div><div class="v num">${money(invValue())}</div></div>
       <div class="stat tap" onclick="go('items');itemFilter='low';renderItems()"><div class="k">Items to restock</div><div class="v num ${low.length?'warnv':''}">${low.length}</div></div>
     </div>
+    ${expHTML}
 
     <div class="card pad daypick">
       <label>Look at another day</label>
@@ -669,7 +749,8 @@ function renderDay(){
   const salesList=sales.length? sales.map(function(s){
     const items=(s.items&&s.items.length)?s.items:null;
     const title=items? items.map(function(it){ return esc(it.name)+' ×'+it.qty; }).join(', ') : (esc(s.note)||'Cash sale');
-    const bits=[timeOf(s.ts), s.staff?esc(s.staff):'', s.noIncome?'already counted':'', (items&&s.note)?esc(s.note):''].filter(Boolean);
+    const bits=[timeOf(s.ts), s.staff?esc(s.staff):'', s.noIncome?'already counted':'', (items&&s.note)?esc(s.note):'',
+      s.airtime?'card '+money(s.airtime.amount)+' + cash back '+money(s.airtime.cashback):''].filter(Boolean);
     return dayRow({ ico:s.noIncome?'buy':'in', glyph:s.noIncome?'⇄':'↓',
       title:title, sub:bits.join(' · ')||'—',
       amt:(s.noIncome?'':'+')+money(s.total).slice(1), amtCls:s.noIncome?'':'in',
@@ -693,6 +774,18 @@ function renderDay(){
       edit:"editExpense('"+e.id+"')", del:"delRec('e','"+e.id+"')" });
   }).join('') : '<div class="empty">No expenses.</div>';
 
+  /* debts are credit given, not money in or out, so they sit beside the net rather than inside it */
+  const debts=(store.settings.debts||[]).filter(function(d){ return d.date===vd; }).slice().sort(function(a,b){ return (a.ts||0)-(b.ts||0); });
+  const debtDay=debts.reduce(function(a,d){ return a+debtTotal(d); },0);
+  const debtPaidDay=(store.settings.debts||[]).filter(function(d){ return d.paid && d.paidDate===vd; }).reduce(function(a,d){ return a+debtTotal(d); },0);
+  const debtList=debts.length? debts.map(function(d){
+    return dayRow({ ico:d.paid?'in':'exp', glyph:d.paid?'✓':'⧗',
+      title:esc(d.cust||'-')+' — '+esc(d.item||'-')+' ×'+(Number(d.qty)||0),
+      sub:[timeOf(d.ts), d.paid?'paid'+(d.paidDate?' '+niceDate(d.paidDate):''):'still owing', d.note?esc(d.note):''].filter(Boolean).join(' · '),
+      amt:money(debtTotal(d)).slice(1), amtCls:d.paid?'in':'out',
+      edit:"openDebtForm('"+d.id+"')", del:"delDebt('"+d.id+"')" });
+  }).join('') : '<div class="empty">No debts recorded.</div>';
+
   document.getElementById('v-day').innerHTML=''
     +'<div class="viewtitle">'+(isToday?'Today':niceDate(vd))+'</div>'
     +'<div class="viewsub">Everything recorded on this day. Tap ✎ on any line to correct a wrong entry.</div>'
@@ -710,6 +803,8 @@ function renderDay(){
       +'<div class="split">'
         +'<div class="box"><div class="k">Money in</div><div class="v num">'+money(inc)+'</div></div>'
         +'<div class="box"><div class="k">Money out</div><div class="v num">'+money(buy+exp)+'</div></div>'
+        +'<div class="box"><div class="k">Debts given</div><div class="v num">'+money(debtDay)+'</div></div>'
+        +'<div class="box"><div class="k">Debts paid back</div><div class="v num">'+money(debtPaidDay)+'</div></div>'
       +'</div>'
     +'</div>'
     +'<div class="section-head"><h3>Sales</h3><small class="muted num">'+money(inc)+'</small></div>'
@@ -718,6 +813,8 @@ function renderDay(){
     +'<div class="card">'+buyList+'</div>'
     +'<div class="section-head"><h3>Expenses</h3><small class="muted num">'+money(exp)+'</small></div>'
     +'<div class="card">'+expList+'</div>'
+    +'<div class="section-head"><h3>Debts</h3><small class="muted num">'+debts.length+' · '+money(debtDay)+'</small></div>'
+    +'<div class="card">'+debtList+'</div>'
     +'<div style="height:14px"></div>'
     +'<button class="btn ghost" style="margin-bottom:10px" onclick="outViewDate=\''+vd+'\';outTab=\'log\';go(\'out\')">🧾 Purchase details for this day</button>'
     +'<button class="btn ghost" onclick="go(\'home\')">← Back to home</button>'
@@ -748,7 +845,55 @@ function renderSell(){
   const staffSel=(id,cur)=>store.settings.staff.map(s=>`<option ${s===cur?'selected':''}>${esc(s)}</option>`).join('');
   const modeTabs=`<div class="subtabs">
       <button class="${sellMode==='items'?'on':''}" onclick="sellMode='items';renderSell()">Item by item</button>
-      <button class="${sellMode==='amount'?'on':''}" onclick="sellMode='amount';renderSell()">Total amount</button></div>`;
+      <button class="${sellMode==='amount'?'on':''}" onclick="sellMode='amount';renderSell()">Total amount</button>
+      <button class="${sellMode==='airtime'?'on':''}" onclick="sellMode='airtime';renderSell()">Airtime</button></div>`;
+
+  if(sellMode==='airtime'){
+    const d=qsLastDate||today();
+    const st=qsLastStaff||store.settings.staff[0];
+    const plat=store.settings.lastAirPlat||AIRTIME_PLATFORMS[0];
+    const air=store.sales.filter(s=>s.airtime);
+    const dayAir=air.filter(s=>s.date===today());
+    const sumOf=(list,f)=>list.reduce((a,s)=>a+(Number(s.airtime[f])||0),0);
+    const platRows=AIRTIME_PLATFORMS.map(pl=>{ const l=dayAir.filter(s=>s.airtime.platform===pl);
+      return `<tr><td>${esc(pl)}</td><td>${plain(sumOf(l,'amount'))}</td><td>${plain(sumOf(l,'cashback'))}</td><td><b>${plain(sumOf(l,'amount')+sumOf(l,'cashback'))}</b></td></tr>`; }).join('');
+    const rec=air.slice().sort((a,b)=>b.ts-a.ts).slice(0,10);
+    const recList=rec.length? rec.map(s=>`<div class="row">
+        <div class="ico in">☏</div>
+        <div class="body"><div class="t">Airtime · ${esc(s.airtime.platform)}</div>
+          <div class="s num">${niceDate(s.date)} · card ${money(s.airtime.amount)} + cash back ${money(s.airtime.cashback)}${s.staff?' · '+esc(s.staff):''}</div></div>
+        <div class="amt in num">+${money(s.total).slice(1)}</div>
+        <button class="cedit" title="Edit" onclick="editSale('${s.id}')">✎</button>
+        <button class="crem" onclick="delSale('${s.id}')">✕</button></div>`).join('')
+      : `<div class="empty">No airtime sold yet.</div>`;
+    document.getElementById('v-sell').innerHTML=`
+      <div class="viewtitle">Sell airtime</div>
+      <div class="viewsub">Record recharge cards / airtime sold, the cash back you earned, and the platform it went through.</div>
+      ${modeTabs}
+      <div class="card pad">
+        <div class="two">
+          <div class="field"><label>Airtime / card amount sold</label><div class="money-in"><span>₦</span><input id="atAmt" class="num" type="number" inputmode="decimal" placeholder="0" oninput="airtimePreview()"></div></div>
+          <div class="field"><label>Cash back gained</label><div class="money-in"><span>₦</span><input id="atCash" class="num" type="number" inputmode="decimal" placeholder="0" oninput="airtimePreview()"></div></div></div>
+        <div class="field"><label>Transferred from (platform)</label>
+          <select id="atPlat" onchange="airtimePreview()">${AIRTIME_PLATFORMS.map(p=>`<option ${p===plat?'selected':''}>${esc(p)}</option>`).join('')}</select></div>
+        <div class="two">
+          <div class="field"><label>Date</label><input id="atDate" type="date" value="${d}" max="${today()}"></div>
+          <div class="field"><label>Served by</label><select id="atStaff">${staffSel('atStaff',st)}</select></div></div>
+        <div class="hint" id="atPreviewBox" style="margin-bottom:12px">Enter the card amount above.</div>
+        <button class="btn primary" onclick="recordAirtime()">Record airtime sale</button>
+      </div>
+      <div class="section-head"><h3>Airtime today</h3><small class="muted num">${money(sumOf(dayAir,'amount')+sumOf(dayAir,'cashback'))}</small></div>
+      <div class="card tscroll"><table class="mtable" style="min-width:0">
+        <thead><tr><th>Platform</th><th>Card sold</th><th>Cash back</th><th>Total</th></tr></thead>
+        <tbody>${platRows}</tbody>
+        <tfoot><tr><td>All</td><td>${plain(sumOf(dayAir,'amount'))}</td><td>${plain(sumOf(dayAir,'cashback'))}</td><td>${plain(sumOf(dayAir,'amount')+sumOf(dayAir,'cashback'))}</td></tr></tfoot>
+      </table></div>
+      <div class="section-head"><h3>Recent airtime sales</h3><small class="muted">tap ✕ to remove</small></div>
+      <div class="card">${recList}</div>
+      <div style="height:20px"></div>`;
+    document.getElementById('cartbar').classList.remove('show');
+    return;
+  }
 
   if(sellMode==='amount'){
     const d=qsLastDate||today();
@@ -904,6 +1049,29 @@ function recordQuickSale(){
   toast('Sale recorded · '+money(total)+(isStockType(note)?' · '+stockTypeKey(note)+' stock drawn down':''),'good');
   renderSell();
 }
+/* airtime: the sale total is the card amount plus the cash back earned on it */
+function airtimePreview(){
+  const box=document.getElementById('atPreviewBox'); if(!box)return;
+  const amt=parseFloat(cuVal('atAmt'))||0, cash=parseFloat(cuVal('atCash'))||0;
+  if(amt<=0){ box.textContent='Enter the card amount above.'; return; }
+  box.innerHTML='Recording <b>'+money(amt+cash)+'</b> &middot; card '+money(amt)+' + cash back '+money(cash)+' &middot; '+esc(cuVal('atPlat'));
+}
+function recordAirtime(){
+  const amt=parseFloat(cuVal('atAmt'))||0, cash=parseFloat(cuVal('atCash'))||0;
+  if(amt<=0){ toast('Enter the airtime amount','bad'); return; }
+  if(cash<0){ toast('Cash back cannot be negative','bad'); return; }
+  const platform=cuVal('atPlat')||AIRTIME_PLATFORMS[0];
+  qsLastDate=cuVal('atDate')||today();
+  qsLastStaff=cuVal('atStaff');
+  store.settings.lastAirPlat=platform; saveSet();
+  const sale={ id:uid(), date:qsLastDate, ts:Date.now(), staff:qsLastStaff,
+    note:'Airtime · '+platform, channel:'Airtime', items:[], quick:true,
+    airtime:{ amount:amt, cashback:cash, platform:platform }, total:+(amt+cash).toFixed(2) };
+  store.sales.push(sale);
+  saveS();
+  toast('Airtime recorded · '+money(sale.total),'good');
+  renderSell();
+}
 function delSale(id){
   const s=store.sales.find(x=>x.id===id); if(!s)return;
   askConfirm('Remove this sale of '+money(s.total)+'?'+((s.items&&s.items.length)?' Stock will be added back.':''), function(){
@@ -1055,7 +1223,7 @@ function renderOut(){
           <button class="crem" onclick="delRec('b','${p.id}')">✕</button></div>`;
       }
       const prof=(p.sellP>0&&p.qty>0)?(p.sellP-p.rate)*p.qty:0;
-      const sub=[p.supplier||'', p.qty>0?(p.qty+' '+(p.unit||'pcs')+' @ '+money(p.rate)):'', p.desc||''].filter(Boolean).join(' · ')||'—';
+      const sub=[p.supplier||'', p.qty>0?(p.qty+' '+(p.unit||'pcs')+' @ '+money(p.rate)):'', p.desc||'', p.expiry?'exp '+niceDate(p.expiry):''].filter(Boolean).join(' · ')||'—';
       return `<div class="row"><div class="ico buy">▣</div>
         <div class="body"><div class="t">${esc(p.itemName||p.desc||'Stock purchase')}</div><div class="s">${esc(sub)}</div></div>
         <div style="text-align:right"><div class="amt out num">${money(p.amount)}</div>${prof?`<div class="num" style="font-size:11px;color:var(--in)">+${money(prof).slice(1)} profit</div>`:''}</div>
@@ -1105,6 +1273,8 @@ function renderOut(){
         <div class="field"><label>Item bought</label><input id="siItem" list="prodList" placeholder="Type item name to match your list"></div>
         <datalist id="prodList">${dl}</datalist>
         <div class="field"><label>Description (optional)</label><input id="siDesc" placeholder="e.g. brand, size, batch"></div>
+        <div class="field"><label>Expiry date of the goods (optional)</label><input id="siExp" type="date" min="${iso}">
+          <div style="font-size:10.5px;color:var(--ink-soft);margin-top:4px">You'll be reminded on the Home screen ${EXPIRY_WARN_MONTHS} months before it expires</div></div>
         <div class="two">
           <div class="field"><label>Quantity</label><input id="siQty" class="num" type="number" inputmode="decimal" placeholder="0" oninput="stockInPreview()"></div>
           <div class="field"><label>In</label><select id="siUnit" onchange="stockInPreview()"><option value="pcs">Pieces</option><option value="ctn">Cartons</option></select></div></div>
@@ -1355,6 +1525,7 @@ function purchaseLogHTML(vd){
         +cell('Proposed wholesale', s.sW>0?money(s.sW):'—')
         +cell('Profit / '+s.unitLong, s.sP>0?(money(s.profU)+' <span style="font-weight:600;color:var(--ink-soft)">('+s.pct.toFixed(0)+'%)</span>'):'—', 'style="color:'+(s.profU<0?'var(--out)':'var(--in)')+'"')
         +cell('Expected profit', s.totProf?money(s.totProf):'—', 'style="color:'+(s.totProf<0?'var(--out)':'var(--in)')+'"')
+        +cell('Expiry date', p.expiry?esc(niceDate(p.expiry)):'—', (p.expiry&&daysUntil(p.expiry)<=90)?'style="color:var(--out)"':'')
       +'</div>'
       +(s.sW>0?'<div class="pnote">Wholesale profit at the time: <b style="color:'+(s.profW<0?'var(--out)':'var(--in)')+'">'+money(s.profW)+'</b> per '+s.unitLong+'.</div>':'')
       +(p.desc?'<div class="pnote">Note: '+esc(p.desc)+'</div>':'')
@@ -1393,12 +1564,12 @@ function purchaseLogHTML(vd){
 function exportDayPurchases(vd){
   const list=dayPurchases(vd);
   if(!list.length){ toast('Nothing bought that day','bad'); return; }
-  const rows=[['Date','Time','Item','Supplier','Description','Qty','Unit','Cost rate','Total cost','Proposed retail','Proposed wholesale','Profit/unit','% margin','Total expected profit']];
+  const rows=[['Date','Time','Item','Supplier','Description','Qty','Unit','Cost rate','Total cost','Proposed retail','Proposed wholesale','Profit/unit','% margin','Total expected profit','Expiry date']];
   list.forEach(function(p){
     const s=purchStats(p);
     rows.push([p.date, timeOf(p.ts), p.itemName||p.desc||'', p.supplier||'', p.desc||'',
       s.qty||'', s.qty>0?s.unitShort:'', s.rate||'', s.cost||'', s.sP||'', s.sW||'',
-      s.sP>0?+s.profU.toFixed(2):'', (s.rate>0&&s.sP>0)?s.pct.toFixed(0)+'%':'', s.totProf?+s.totProf.toFixed(2):'']);
+      s.sP>0?+s.profU.toFixed(2):'', (s.rate>0&&s.sP>0)?s.pct.toFixed(0)+'%':'', s.totProf?+s.totProf.toFixed(2):'', p.expiry||'']);
   });
   const csv=rows.map(function(r){ return r.map(function(c){ c=(c==null?'':''+c); return /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c; }).join(','); }).join('\n');
   dl(new Blob([csv],{type:'text/csv'}), 'St-Ritas-Foodz-purchases-'+vd+'.csv');
@@ -1428,9 +1599,10 @@ function addStockIn(){
   const date=cuVal('siDate')||today();
   let supplier=cuVal('siSup').trim(); if(supplier==='__new__') supplier='';
   const desc=cuVal('siDesc').trim();
+  const expiry=cuVal('siExp');
   if(!name){ toast('Type the item name','bad'); return; }
   if(amount<=0){ toast('Enter the amount paid','bad'); return; }
-  const data={qty,amount,unit,sellP,sellW,date,supplier,desc};
+  const data={qty,amount,unit,sellP,sellW,date,supplier,desc,expiry};
   const p=store.products.find(x=>x.name.toLowerCase()===name.toLowerCase());
   if(!p){
     askConfirm('"'+name+'" is not in your item list yet.\nAdd it as a new item and record this stock-in?', function(){
@@ -1449,6 +1621,7 @@ function commitStockIn(p,d){
   saveP();
   store.purchases.push({ id:uid(), ts:Date.now(), date:d.date, supplier:d.supplier, desc:d.desc,
     itemId:p.id, itemName:p.name, qty:d.qty, unit:d.unit, amount:d.amount, rate, sellP:d.sellP, sellW:d.sellW,
+    expiry:d.expiry||'',
     stockNote:(d.qty>0?('+'+d.qty+' '+d.unit+' '+p.name):'') });
   saveB();
   if(d.supplier) rememberSupplier(d.supplier);
@@ -1635,13 +1808,13 @@ function askConfirm(message, onYes, yesLabel, danger){
 function closeConfirmModal(){ _confirmYes=null; closeModal(); }
 function doConfirmModal(){ var cb=_confirmYes; _confirmYes=null; closeModal(); if(cb)cb(); }
 function exportIntakes(){
-  const rows=[['Date','Supplier','Item','Description','Qty','Unit','Amount','Rate (cost)','Price/Wholesale','Price/pcs','Profit/pcs','Profit/wholesale','% profit','Total profit']];
+  const rows=[['Date','Supplier','Item','Description','Qty','Unit','Amount','Rate (cost)','Price/Wholesale','Price/pcs','Profit/pcs','Profit/wholesale','% profit','Total profit','Expiry date']];
   store.purchases.filter(p=>p.itemId||p.qty>0).slice().sort((a,b)=>a.ts-b.ts).forEach(p=>{
     const rate=p.rate||0, sP=p.sellP||0, sW=p.sellW||0;
     const profP=sP>0?sP-rate:0, profW=sW>0?sW-rate:0;
     const pct=rate>0&&sP>0?(profP/rate*100).toFixed(0)+'%':'';
     const tot=(sP>0&&p.qty>0)?profP*p.qty:'';
-    rows.push([p.date,p.supplier||'',p.itemName||p.desc||'',p.desc||'',p.qty||'',p.unit||'',p.amount||'',rate||'',sW||'',sP||'',sP>0?profP:'',sW>0?profW:'',pct,tot]);
+    rows.push([p.date,p.supplier||'',p.itemName||p.desc||'',p.desc||'',p.qty||'',p.unit||'',p.amount||'',rate||'',sW||'',sP||'',sP>0?profP:'',sW>0?profW:'',pct,tot,p.expiry||'']);
   });
   if(rows.length===1){ toast('No stock-in records yet','bad'); return; }
   const csv=rows.map(r=>r.map(c=>{ c=(c==null?'':''+c); return /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c; }).join(',')).join('\n');
@@ -1756,6 +1929,8 @@ function renderReports(){
   const corr=buys.filter(p=>p.amount<0).reduce((a,p)=>a+(-p.amount),0);
   const grossBuy=buyT;   // net stock bought = real purchases minus reductions (matches Money Out − expenses)
   const profit=inc-buyT-expT;
+  const airS=sales.filter(s=>s.airtime);
+  const airCard=airS.reduce((a,s)=>a+(Number(s.airtime.amount)||0),0), airCash=airS.reduce((a,s)=>a+(Number(s.airtime.cashback)||0),0);
   const series=[]; const cur=new Date(r.start);
   while(cur<=r.end && series.length<62){ const iso=dstr(cur); series.push({iso,v:salesTotal(iso)}); cur.setDate(cur.getDate()+1); }
   const max=Math.max(...series.map(s=>s.v),1); const bw=100/Math.max(series.length,1);
@@ -1806,6 +1981,8 @@ function renderReports(){
       <div class="repcard"><div class="k" style="color:var(--out)">Money out</div><div class="v num" style="color:var(--out)">${money(buyT+expT)}</div></div>
       <div class="repcard"><div class="k">Stock bought</div><div class="v num">${money(grossBuy)}</div></div>
       <div class="repcard"><div class="k">Expenses</div><div class="v num">${money(expT)}</div></div>
+      ${airS.length?`<div class="repcard"><div class="k">Airtime sold</div><div class="v num">${money(airCard)}</div></div>
+      <div class="repcard"><div class="k">Airtime cash back</div><div class="v num" style="color:var(--in)">${money(airCash)}</div></div>`:''}
       ${corr>0?`<div class="repcard" style="grid-column:1/-1;background:var(--in-soft);border-color:#bfe0cd">
         <div class="k" style="color:var(--in)">Corrections applied (reduced Money Out)</div>
         <div class="v num" style="color:var(--in)">−${money(corr).slice(1)}</div></div>`:''}
@@ -1907,28 +2084,47 @@ document.addEventListener('click', function(e){
 /* ===== DEBT LIST ===== */
 let debtFilter='open';   // 'open' | 'paid' | 'all'
 let debtSearch='';
+let debtCust='';         // '' = every customer, otherwise custKey() of one customer
+/* one customer however the name was typed: "mama chika " and "Mama Chika" are the same person */
+function custKey(n){ return (n||'').trim().replace(/\s+/g,' ').toLowerCase(); }
+/* every customer on the debt list, with what they owe and have paid, biggest debtor first */
+function debtCustomers(){
+  const map={};
+  (store.settings.debts||[]).forEach(function(d){
+    const k=custKey(d.cust); if(!k) return;
+    if(!map[k]) map[k]={ key:k, name:(d.cust||'').trim(), owing:0, paid:0, nOpen:0, n:0, last:'' };
+    const c=map[k], t=debtTotal(d);
+    c.n++;
+    if(d.paid) c.paid+=t; else { c.owing+=t; c.nOpen++; }
+    if((d.date||'')>c.last) c.last=d.date||'';
+  });
+  return Object.keys(map).map(function(k){ return map[k]; })
+    .sort(function(a,b){ return b.owing-a.owing || a.name.localeCompare(b.name); });
+}
 function debtRows(){
   const q=debtSearch.toLowerCase();
   let list=(store.settings.debts||[]).slice();
   if(debtFilter==='open') list=list.filter(function(d){ return !d.paid; });
   else if(debtFilter==='paid') list=list.filter(function(d){ return d.paid; });
+  if(debtCust) list=list.filter(function(d){ return custKey(d.cust)===debtCust; });
   if(q) list=list.filter(function(d){ return (d.cust||'').toLowerCase().indexOf(q)>-1 || (d.item||'').toLowerCase().indexOf(q)>-1; });
   return list.sort(function(a,b){
     if(!!a.paid!==!!b.paid) return a.paid?1:-1;
-    return (b.ts||0)-(a.ts||0);
+    return (''+(b.date||'')).localeCompare(''+(a.date||'')) || (b.ts||0)-(a.ts||0);
   });
 }
 function debtTotal(d){ return (Number(d.qty)||0)*(Number(d.amount)||0); }
-function renderDebt(){
+function debtFilterLabel(){ return debtFilter==='paid'?'Settled':(debtFilter==='all'?'All rows':'Outstanding'); }
+function debtTableHTML(){
   const list=debtRows();
-  const all=store.settings.debts||[];
-  const nOpen=all.filter(function(d){ return !d.paid; }).length;
-  const owed=all.filter(function(d){ return !d.paid; }).reduce(function(a,d){ return a+debtTotal(d); },0);
-  const settled=all.filter(function(d){ return d.paid; }).reduce(function(a,d){ return a+debtTotal(d); },0);
-
-  const body=list.length ? list.map(function(d){
+  if(!list.length){
+    return '<div class="card"><div class="empty"><b>Nothing here yet</b>'
+      +((debtFilter==='open'&&!debtCust&&!debtSearch)?'No one is owing right now. Tap &ldquo;Add a debt&rdquo; to record one.':'No records match this filter.')+'</div></div>';
+  }
+  const body=list.map(function(d){
     return '<tr class="'+(d.paid?'paid':'')+'">'
-      +'<td class="cust">'+esc(d.cust||'-')+'</td>'
+      +'<td style="text-align:left">'+(d.date?esc(niceDate(d.date)):'-')+'</td>'
+      +'<td class="cust" style="text-align:left">'+esc(d.cust||'-')+'</td>'
       +'<td style="text-align:left">'+esc(d.item||'-')+'</td>'
       +'<td class="num">'+(Number(d.qty)||0)+'</td>'
       +'<td class="num">'+money(d.amount).slice(1)+'</td>'
@@ -1938,70 +2134,92 @@ function renderDebt(){
         +'<button class="cedit" title="Edit" onclick="openDebtForm(\''+d.id+'\')">&#9998;</button>'
         +'<button class="crem" title="Delete" onclick="delDebt(\''+d.id+'\')">&#10005;</button>'
       +'</td></tr>';
-  }).join('') : '';
-
-  const table = body
-    ? '<div class="card tscroll"><table class="mtable debtable">'
-      +'<thead><tr><th>Customer</th><th style="text-align:left">Item</th><th>Qty</th><th>Amount</th><th>Total</th><th></th></tr></thead>'
-      +'<tbody>'+body+'</tbody>'
-      +'<tfoot><tr><td colspan="4">'+(debtFilter==='paid'?'Settled':(debtFilter==='all'?'All rows':'Outstanding'))+'</td>'
-        +'<td class="num">'+money(list.reduce(function(a,d){ return a+debtTotal(d); },0)).slice(1)+'</td><td></td></tr></tfoot>'
-      +'</table></div>'
-    : '<div class="card"><div class="empty"><b>Nothing here yet</b>'
-      +(debtFilter==='open'?'No one is owing right now. Tap &ldquo;Add a debt&rdquo; to record one.':'No records match this filter.')+'</div></div>';
+  }).join('');
+  return '<div class="card tscroll"><table class="mtable debtable">'
+    +'<thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Customer</th><th style="text-align:left">Item</th><th>Qty</th><th>Amount</th><th>Total</th><th></th></tr></thead>'
+    +'<tbody>'+body+'</tbody>'
+    +'<tfoot><tr><td colspan="5">'+debtFilterLabel()+' · '+list.length+' row'+(list.length!==1?'s':'')+'</td>'
+      +'<td class="num">'+money(list.reduce(function(a,d){ return a+debtTotal(d); },0)).slice(1)+'</td><td></td></tr></tfoot>'
+    +'</table></div>';
+}
+function debtCustomerTableHTML(){
+  const custs=debtCustomers().filter(function(c){ return debtFilter==='paid' ? c.paid>0 : (debtFilter==='open' ? c.owing>0 : true); });
+  if(!custs.length) return '';
+  const rows=custs.map(function(c){
+    return '<tr class="tap" style="cursor:pointer'+(c.key===debtCust?';background:var(--gold-soft)':'')+'" onclick="pickDebtCust(\''+esc(c.key).replace(/'/g,"\\'")+'\')">'
+      +'<td class="cust" style="text-align:left">'+esc(c.name)+'</td>'
+      +'<td class="num">'+c.nOpen+'</td>'
+      +'<td class="num" style="color:var(--out)"><b>'+money(c.owing).slice(1)+'</b></td>'
+      +'<td class="num" style="color:var(--in)">'+money(c.paid).slice(1)+'</td></tr>';
+  }).join('');
+  const owing=custs.reduce(function(a,c){ return a+c.owing; },0), paid=custs.reduce(function(a,c){ return a+c.paid; },0);
+  return '<div class="section-head"><h3>Total per customer</h3><small class="muted">tap a name to see their list</small></div>'
+    +'<div class="card tscroll"><table class="mtable debtable" style="min-width:0">'
+    +'<thead><tr><th style="text-align:left">Customer</th><th>Items owing</th><th>Owing</th><th>Paid</th></tr></thead>'
+    +'<tbody>'+rows+'</tbody>'
+    +'<tfoot><tr><td style="text-align:left">'+custs.length+' customer'+(custs.length!==1?'s':'')+'</td><td></td><td class="num">'+money(owing).slice(1)+'</td><td class="num">'+money(paid).slice(1)+'</td></tr></tfoot>'
+    +'</table></div>';
+}
+function pickDebtCust(k){ debtCust=(debtCust===k?'':k); renderDebt(); }
+function renderDebt(){
+  const all=store.settings.debts||[];
+  const custs=debtCustomers();
+  if(debtCust && !custs.some(function(c){ return c.key===debtCust; })) debtCust='';
+  const scope=debtCust?all.filter(function(d){ return custKey(d.cust)===debtCust; }):all;
+  const nOpen=scope.filter(function(d){ return !d.paid; }).length;
+  const owed=scope.filter(function(d){ return !d.paid; }).reduce(function(a,d){ return a+debtTotal(d); },0);
+  const settled=scope.filter(function(d){ return d.paid; }).reduce(function(a,d){ return a+debtTotal(d); },0);
+  const who=debtCust?custs.find(function(c){ return c.key===debtCust; }).name:'';
+  const custSel='<select id="debtCustSel" onchange="debtCust=this.value;renderDebt()" style="width:100%;padding:12px 13px;border:1px solid '+(debtCust?'var(--brand)':'var(--line)')+';border-radius:13px;background:var(--surface);font-weight:650;margin-bottom:10px">'
+    +'<option value="">All customers ('+custs.length+') ▾</option>'
+    +custs.map(function(c){ return '<option value="'+esc(c.key)+'" '+(c.key===debtCust?'selected':'')+'>'+esc(c.name)+' — owing '+money(c.owing)+'</option>'; }).join('')
+    +'</select>';
 
   document.getElementById('v-debt').innerHTML=''
     +'<div class="viewtitle">Debt list</div>'
-    +'<div class="viewsub">Who is owing, for what, and how much. Tap &#10003; when a customer pays.</div>'
+    +'<div class="viewsub">Who is owing, for what, how much and since when. Tap &#10003; when a customer pays.</div>'
     +'<div class="dtot">'
-      +'<div class="box"><div class="k">Still owing</div><div class="v num" style="color:var(--out)">'+money(owed)+'</div></div>'
+      +'<div class="box"><div class="k">'+(who?esc(who)+' owes':'Still owing')+'</div><div class="v num" style="color:var(--out)">'+money(owed)+'</div></div>'
       +'<div class="box"><div class="k">Already paid</div><div class="v num" style="color:var(--in)">'+money(settled)+'</div></div>'
     +'</div>'
     +'<button class="btn primary" style="margin-bottom:14px" onclick="openDebtForm()">+ Add a debt</button>'
+    +custSel
     +'<div class="searchwrap">'
       +'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>'
       +'<input id="debtSearchBox" placeholder="Find a customer or item..." value="'+esc(debtSearch)+'" oninput="debtSearch=this.value;refreshDebtTable()"></div>'
     +'<div class="chips" style="margin-bottom:10px">'
       +'<button class="chip '+(debtFilter==='open'?'on':'')+'" onclick="debtFilter=\'open\';renderDebt()">Owing ('+nOpen+')</button>'
       +'<button class="chip '+(debtFilter==='paid'?'on':'')+'" onclick="debtFilter=\'paid\';renderDebt()">Paid</button>'
-      +'<button class="chip '+(debtFilter==='all'?'on':'')+'" onclick="debtFilter=\'all\';renderDebt()">All</button></div>'
-    +'<div id="debtTableWrap">'+table+'</div>'
+      +'<button class="chip '+(debtFilter==='all'?'on':'')+'" onclick="debtFilter=\'all\';renderDebt()">All</button>'
+      +(debtCust?'<button class="chip" onclick="debtCust=\'\';renderDebt()">Show all customers ✕</button>':'')+'</div>'
+    +'<div id="debtTableWrap">'+debtTableHTML()+'</div>'
+    +(debtCust?'':debtCustomerTableHTML())
     +'<div style="height:14px"></div>'
-    +'<button class="btn ghost" style="margin-bottom:10px" onclick="exportDebts()">&#10515; Export debt list (Excel)</button>'
+    +'<div class="two" style="margin-bottom:10px">'
+      +'<button class="btn ghost" onclick="exportDebts()">&#10515; Download (Excel)</button>'
+      +'<button class="btn ghost" onclick="printDebts()">&#9113; Print</button></div>'
+    +'<div style="font-size:11.5px;color:var(--ink-soft);margin:-2px 2px 12px">Download and Print use what is showing now'+(who?' — only '+esc(who):'')+'.</div>'
     +'<button class="btn ghost" onclick="go(\'items\')">&larr; Back to items</button>'
     +'<div style="height:10px"></div>';
 }
 /* redraw only the table so the search box keeps focus while typing */
 function refreshDebtTable(){
-  const list=debtRows();
   const wrap=document.getElementById('debtTableWrap'); if(!wrap){ renderDebt(); return; }
-  const body=list.length ? list.map(function(d){
-    return '<tr class="'+(d.paid?'paid':'')+'">'
-      +'<td class="cust">'+esc(d.cust||'-')+'</td>'
-      +'<td style="text-align:left">'+esc(d.item||'-')+'</td>'
-      +'<td class="num">'+(Number(d.qty)||0)+'</td>'
-      +'<td class="num">'+money(d.amount).slice(1)+'</td>'
-      +'<td class="num"><b>'+money(debtTotal(d)).slice(1)+'</b></td>'
-      +'<td style="white-space:nowrap">'
-        +'<button class="cedit" title="'+(d.paid?'Mark unpaid':'Mark paid')+'" onclick="toggleDebtPaid(\''+d.id+'\')">'+(d.paid?'&#8634;':'&#10003;')+'</button>'
-        +'<button class="cedit" title="Edit" onclick="openDebtForm(\''+d.id+'\')">&#9998;</button>'
-        +'<button class="crem" title="Delete" onclick="delDebt(\''+d.id+'\')">&#10005;</button>'
-      +'</td></tr>';
-  }).join('') : '';
-  wrap.innerHTML = body
-    ? '<div class="card tscroll"><table class="mtable debtable">'
-      +'<thead><tr><th>Customer</th><th style="text-align:left">Item</th><th>Qty</th><th>Amount</th><th>Total</th><th></th></tr></thead>'
-      +'<tbody>'+body+'</tbody>'
-      +'<tfoot><tr><td colspan="4">'+(debtFilter==='paid'?'Settled':(debtFilter==='all'?'All rows':'Outstanding'))+'</td>'
-        +'<td class="num">'+money(list.reduce(function(a,d){ return a+debtTotal(d); },0)).slice(1)+'</td><td></td></tr></tfoot>'
-      +'</table></div>'
-    : '<div class="card"><div class="empty"><b>No records match</b>Try a different name.</div></div>';
+  wrap.innerHTML=debtTableHTML();
 }
 function openDebtForm(id){
   const d=id ? (store.settings.debts||[]).find(function(x){ return x.id===id; }) : null;
   const itemOpts=store.products.map(function(p){ return '<option value="'+esc(p.name)+'">'; }).join('');
+  /* existing debtors first, then saved contacts, so a returning customer is picked rather than retyped */
+  const seen={}, names=[];
+  debtCustomers().map(function(c){ return c.name; })
+    .concat((store.settings.contacts||[]).map(function(c){ return (c.name||'').trim(); }))
+    .forEach(function(n){ const k=custKey(n); if(k && !seen[k]){ seen[k]=1; names.push(n); } });
+  const preset=d?d.cust:(debtCust?(debtCustomers().find(function(c){ return c.key===debtCust; })||{}).name||'':'');
   openModal(d?'Edit debt':'Add a debt',
-     '<div class="field"><label>Customer&rsquo;s name</label><input id="dbCust" value="'+esc(d?d.cust:'')+'" placeholder="e.g. Mama Chika"></div>'
+     '<div class="field"><label>Customer&rsquo;s name</label><input id="dbCust" list="dbCustList" autocomplete="off" value="'+esc(preset)+'" placeholder="Pick from the list or type a new name" oninput="debtCustHint()">'
+      +'<datalist id="dbCustList">'+names.map(function(n){ return '<option value="'+esc(n)+'">'; }).join('')+'</datalist>'
+      +'<div id="dbCustHint" style="font-size:11px;color:var(--ink-soft);margin-top:4px;min-height:14px"></div></div>'
     +'<div class="field"><label>Item</label><input id="dbItem" list="dbItemList" value="'+esc(d?d.item:'')+'" placeholder="e.g. Bag of rice">'
       +'<datalist id="dbItemList">'+itemOpts+'</datalist></div>'
     +'<div class="two">'
@@ -2013,14 +2231,22 @@ function openDebtForm(id){
     +'<div class="hint" id="dbTotalBox" style="margin:12px 0 0">Total: '+money(d?debtTotal(d):0)+'</div>',
      '<div class="two"><button class="btn ghost" onclick="closeModal()">Cancel</button>'
      +'<button class="btn primary" onclick="submitDebt('+(d?('\''+d.id+'\''):'')+')">'+(d?'Save changes':'Add debt')+'</button></div>');
-  setTimeout(function(){ const el=document.getElementById('dbCust'); if(el)el.focus(); },60);
+  debtCustHint();
+  setTimeout(function(){ const el=document.getElementById(preset?'dbItem':'dbCust'); if(el)el.focus(); },60);
+}
+/* under the name box: what this customer already owes, so the shop sees it before adding more */
+function debtCustHint(){
+  const el=document.getElementById('dbCustHint'); if(!el) return;
+  const k=custKey(cuVal('dbCust'));
+  const c=k?debtCustomers().find(function(x){ return x.key===k; }):null;
+  el.innerHTML=c?('Already owing <b style="color:var(--out)">'+money(c.owing)+'</b> on '+c.nOpen+' item'+(c.nOpen!==1?'s':'')):'';
 }
 function debtFormPreview(){
   const t=(parseFloat(cuVal('dbQty'))||0)*(parseFloat(cuVal('dbAmt'))||0);
   const box=document.getElementById('dbTotalBox'); if(box) box.textContent='Total: '+money(t);
 }
 function submitDebt(id){
-  const cust=cuVal('dbCust').trim();
+  let cust=cuVal('dbCust').trim().replace(/\s+/g,' ');
   const item=cuVal('dbItem').trim();
   const qty=parseFloat(cuVal('dbQty'))||0;
   const amount=parseFloat(cuVal('dbAmt'))||0;
@@ -2029,6 +2255,9 @@ function submitDebt(id){
   if(qty<=0){ toast('Qty must be more than zero','bad'); return; }
   if(amount<=0){ toast('Enter the amount','bad'); return; }
   if(!Array.isArray(store.settings.debts)) store.settings.debts=[];
+  /* reuse the spelling already on the list so one customer never splits into two */
+  const known=debtCustomers().find(function(c){ return c.key===custKey(cust); });
+  if(known) cust=known.name;
   const date=cuVal('dbDate')||today();
   const note=cuVal('dbNote').trim();
   if(id){
@@ -2038,31 +2267,63 @@ function submitDebt(id){
   } else {
     store.settings.debts.push({ id:uid(), ts:Date.now(), date:date, cust:cust, item:item, qty:qty, amount:amount, note:note, paid:false });
   }
-  saveSet(); closeModal(); renderDebt();
+  saveSet(); closeModal(); rerender();
   toast(id?'Debt updated':('Debt added - '+money(qty*amount)),'good');
 }
 function toggleDebtPaid(id){
   const d=(store.settings.debts||[]).find(function(x){ return x.id===id; }); if(!d)return;
-  if(d.paid){ d.paid=false; d.paidDate=''; saveSet(); renderDebt(); toast('Moved back to owing','good'); return; }
+  if(d.paid){ d.paid=false; d.paidDate=''; saveSet(); rerender(); toast('Moved back to owing','good'); return; }
   askConfirm('Mark '+(d.cust||'this customer')+" - "+money(debtTotal(d))+' as paid?', function(){
-    d.paid=true; d.paidDate=today(); saveSet(); renderDebt(); toast('Marked as paid','good');
+    d.paid=true; d.paidDate=today(); saveSet(); rerender(); toast('Marked as paid','good');
   }, 'Mark paid');
 }
 function delDebt(id){
   const d=(store.settings.debts||[]).find(function(x){ return x.id===id; }); if(!d)return;
   askConfirm('Remove '+(d.cust||'this')+' - '+(d.item||'')+' ('+money(debtTotal(d))+') from the debt list?', function(){
     store.settings.debts=(store.settings.debts||[]).filter(function(x){ return x.id!==id; });
-    saveSet(); renderDebt();
+    saveSet(); rerender();
   }, 'Delete', true);
 }
+/* what Download and Print cover: the current customer and Owing/Paid/All filter, oldest first */
+function debtExportList(){
+  return debtRows().slice().sort(function(a,b){ return (''+(a.date||'')).localeCompare(''+(b.date||'')) || (a.ts||0)-(b.ts||0); });
+}
+function debtExportName(){
+  const c=debtCust?debtCustomers().find(function(x){ return x.key===debtCust; }):null;
+  return c?c.name:'';
+}
 function exportDebts(){
-  const list=(store.settings.debts||[]).slice().sort(function(a,b){ return (a.ts||0)-(b.ts||0); });
+  const list=debtExportList();
   if(!list.length){ toast('Nothing to export','bad'); return; }
   const rows=[['Date','Customer name','Item','Qty','Amount','Total','Status','Paid on','Note']];
   list.forEach(function(d){ rows.push([d.date||'',d.cust||'',d.item||'',Number(d.qty)||0,Number(d.amount)||0,debtTotal(d),d.paid?'Paid':'Owing',d.paidDate||'',d.note||'']); });
   rows.push(['TOTAL OWING','','','','',list.filter(function(d){ return !d.paid; }).reduce(function(a,d){ return a+debtTotal(d); },0),'','','']);
-  const csv=rows.map(function(r){ return r.map(function(c){ c=(c==null?'':''+c); return /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c; }).join(','); }).join('\n');
-  dl(new Blob([csv],{type:'text/csv'}), 'St-Ritas-Foodz-debts-'+today()+'.csv'); toast('Debt list exported','good');
+  rows.push([]);
+  rows.push(['TOTAL PER CUSTOMER','','','','','Owing','Paid','Items owing','Last debt']);
+  const keys={}; list.forEach(function(d){ keys[custKey(d.cust)]=1; });
+  debtCustomers().filter(function(c){ return keys[c.key]; }).forEach(function(c){ rows.push([c.name,'','','','',c.owing,c.paid,c.nOpen,c.last]); });
+  const who=debtExportName();
+  dl(new Blob([csvOf(rows)],{type:'text/csv'}), 'St-Ritas-Foodz-debts-'+(who?who.replace(/[^\w]+/g,'-')+'-':'')+today()+'.csv');
+  toast('Debt list exported','good');
+}
+function printDebts(){
+  const list=debtExportList();
+  if(!list.length){ toast('Nothing to print','bad'); return; }
+  const who=debtExportName();
+  const owing=list.filter(function(d){ return !d.paid; }).reduce(function(a,d){ return a+debtTotal(d); },0);
+  const main=printTable(['Date','Customer','Item','Qty','Amount','Total','Status'],
+    list.map(function(d){ return [d.date?niceDate(d.date):'-', d.cust||'-', d.item||'-', Number(d.qty)||0, Number(d.amount)||0, debtTotal(d),
+      d.paid?'Paid'+(d.paidDate?' '+niceDate(d.paidDate):''):'Owing']; }),
+    ['Total owing','','','','',owing,'']);
+  let per='';
+  if(!who){
+    const keys={}; list.forEach(function(d){ keys[custKey(d.cust)]=1; });
+    const custs=debtCustomers().filter(function(c){ return keys[c.key]; });
+    per='<h2>Total per customer</h2>'+printTable(['Customer','Items owing','Owing','Paid'],
+      custs.map(function(c){ return [c.name, c.nOpen, c.owing, c.paid]; }),
+      [custs.length+' customers','',custs.reduce(function(a,c){ return a+c.owing; },0),custs.reduce(function(a,c){ return a+c.paid; },0)]);
+  }
+  printDoc('Debt list'+(who?' · '+who:'')+' ('+debtFilterLabel().toLowerCase()+')', main+per);
 }
 
 /* ===== CUSTOMER CONTACTS ===== */
@@ -2191,6 +2452,9 @@ function renderItems(){
     </div>
     <div style="height:14px"></div>
     <div class="hint">Tap an item&rsquo;s <b>name</b> to see its full details &mdash; every sale and purchase of it. Cost is filled automatically when you record <b>Stock in</b>, and used to work out profit. Reducing a stock count here needs the passkey.</div>
+    <div class="two" style="margin-bottom:12px">
+      <button class="btn ghost" style="padding:11px" onclick="exportItems()">⤓ Download item list</button>
+      <button class="btn ghost" style="padding:11px" onclick="printItems()">⎙ Print item list</button></div>
     <div class="additem">
       <input id="newItem" placeholder="Add a new item…" style="flex:1;padding:12px 13px;border:1px solid var(--line);border-radius:12px;background:var(--surface)" onkeydown="if(event.key==='Enter')addItem()">
       <button class="btn gold" style="width:auto;padding:12px 16px" onclick="addItem()">Add</button></div>
@@ -2241,6 +2505,31 @@ function setField(id,f,v){ const p=store.products.find(x=>x.id===id); if(!p)retu
     return;
   }
   p[f]=nv; saveP(); if(itemFilter==='low') refreshItems(); }
+/* the list as filtered on screen (search, category, running low), A to Z */
+function itemExportList(){
+  const q=itemSearch.toLowerCase();
+  let list=store.products.filter(p=>p.name.toLowerCase().includes(q));
+  if(itemCat!=='All') list=list.filter(p=>p.cat===itemCat);
+  if(itemFilter==='low'){ const t=store.settings.low; list=list.filter(p=>(p.pp>0||p.pc>0)&&p.qc<=0&&p.qp<=t); }
+  return list.slice().sort((a,b)=>a.name.localeCompare(b.name));
+}
+function exportItems(){
+  const list=itemExportList();
+  if(!list.length){ toast('No items to export','bad'); return; }
+  const rows=[['Item','Category','Cost each','Price each','Wholesale','Cost / carton','Price / carton','Stock (pcs)','Stock (ctn)','Stock value (cost)','Stock value (selling)','Nearest expiry']];
+  list.forEach(p=>rows.push([p.name,p.cat,p.cost||'',p.pp||'',p.pw||'',p.costC||'',p.pc||'',p.qp||0,p.qc||0,
+    (p.qp>0?p.qp*(p.cost||0):0)+(p.qc>0?p.qc*(p.costC||0):0), (p.qp>0?p.qp*p.pp:0)+(p.qc>0?p.qc*p.pc:0), itemExpiry(p)]));
+  dl(new Blob([csvOf(rows)],{type:'text/csv'}), 'St-Ritas-Foodz-items-'+today()+'.csv');
+  toast(list.length+' items exported','good');
+}
+function printItems(){
+  const list=itemExportList();
+  if(!list.length){ toast('No items to print','bad'); return; }
+  const val=list.reduce((a,p)=>a+(p.qp>0?p.qp*p.pp:0)+(p.qc>0?p.qc*p.pc:0),0);
+  printDoc('Item list', printTable(['Item','Category','Cost','Price','Wholesale','Price/ctn','Stock pcs','Stock ctn','Expiry'],
+    list.map(p=>{ const ex=itemExpiry(p); return [p.name,p.cat,p.cost||0,p.pp||0,p.pw||0,p.pc||0,p.qp||0,p.qc||0,ex?niceDate(ex):'']; }),
+    [list.length+' items','','','','','','','','Value '+plain(val)]));
+}
 function setSuppliers(v){ store.settings.suppliers=v.split(',').map(s=>s.trim()).filter(Boolean); saveSet(); }
 function setNoteOpts(v){
   const arr=v.split(',').map(s=>s.trim()).filter(Boolean);
@@ -2306,6 +2595,7 @@ function openItemDetail(id){
     +(p.pw>0?kv('Wholesale', money(p.pw)):'')
     +(p.pc>0?kv('Price / carton', money(p.pc)):'')
     +(p.costC>0?kv('Cost / carton', money(p.costC)):'')
+    +(itemExpiry(p)?kv('Nearest expiry', niceDate(itemExpiry(p))+' · '+expiryText(itemExpiry(p))):'')
     +((p.pp>0&&p.cost>0)?kv('Margin each', money(p.pp-p.cost)+' ('+(((p.pp-p.cost)/p.cost)*100).toFixed(0)+'%)'):'')
     +'</div>';
 
@@ -2485,6 +2775,7 @@ function openPurchaseEditor(id){
     +'<div class="field"><label>Item bought</label><input id="epItem" list="epProdList" value="'+esc(p.itemName||'')+'">'
       +'<datalist id="epProdList">'+dl+'</datalist></div>'
     +'<div class="field"><label>Description</label><input id="epDesc" value="'+esc(p.desc||'')+'" placeholder="e.g. brand, size, batch"></div>'
+    +'<div class="field"><label>Expiry date (optional)</label><input id="epExp" type="date" value="'+esc(p.expiry||'')+'"></div>'
     +'<div class="two">'
       +'<div class="field"><label>Quantity</label><input id="epQty" class="num" type="number" inputmode="decimal" value="'+(Number(p.qty)||0)+'" oninput="editBuyPreview()"></div>'
       +'<div class="field"><label>In</label><select id="epUnit" onchange="editBuyPreview()">'
@@ -2539,6 +2830,8 @@ function submitEditPurchase(id,neg){
   p.date=date; p.supplier=cuVal('epSup'); p.desc=desc;
   p.itemId=target.id; p.itemName=target.name;
   p.qty=qty; p.unit=unit; p.amount=amount; p.rate=rate; p.sellP=sellP; p.sellW=sellW;
+  const expiry=cuVal('epExp');
+  if(expiry!==(p.expiry||'')){ p.expiry=expiry; p.expiryDone=false; }   // a new date re-arms the reminder
   p.stockNote=(qty>0?('+'+qty+' '+unit+' '+target.name):'');
 
   // only refresh the item's cost/price if this purchase is the one that set them
@@ -2561,6 +2854,19 @@ function editSale(id){
     +'<div class="field"><label>Type of Sales</label><input id="esNote" list="esNoteList" value="'+esc(s.note||'')+'" placeholder="optional">'
       +'<datalist id="esNoteList">'+((store.settings.noteOpts&&store.settings.noteOpts.length)?store.settings.noteOpts:NOTE_OPTS).map(function(o){ return '<option value="'+esc(o)+'">'; }).join('')+'</datalist></div>';
   const hasItems=!!(s.items && s.items.length);
+  if(s.airtime){
+    openModal('Edit airtime sale',
+       '<div class="two">'
+        +'<div class="field"><label>Card amount sold</label><div class="money-in"><span>₦</span><input id="esAirAmt" class="num" type="number" inputmode="decimal" value="'+(Number(s.airtime.amount)||0)+'"></div></div>'
+        +'<div class="field"><label>Cash back gained</label><div class="money-in"><span>₦</span><input id="esAirCash" class="num" type="number" inputmode="decimal" value="'+(Number(s.airtime.cashback)||0)+'"></div></div></div>'
+      +'<div class="field"><label>Platform</label><select id="esAirPlat">'+AIRTIME_PLATFORMS.map(function(p){ return '<option '+(p===s.airtime.platform?'selected':'')+'>'+esc(p)+'</option>'; }).join('')+'</select></div>'
+      +'<div class="two">'
+        +'<div class="field"><label>Date</label><input id="esDate" type="date" value="'+s.date+'" max="'+today()+'"></div>'
+        +'<div class="field"><label>Served by</label><select id="esStaff"><option value="">—</option>'+staffOpts+'</select></div></div>',
+       '<div class="two"><button class="btn ghost" onclick="closeModal()">Cancel</button>'
+      +'<button class="btn primary" onclick="submitEditSale(\''+id+'\')">Save changes</button></div>');
+    return;
+  }
   if(!hasItems){
     openModal('Edit sale',
        '<div class="hint">Correct the amount, date or note of this sale.</div>'
@@ -2615,6 +2921,17 @@ function submitEditSale(id){
   const date=cuVal('esDate')||s.date;
   const staff=cuVal('esStaff');
   const note=cuVal('esNote').trim();
+
+  if(s.airtime){
+    const amt=parseFloat(cuVal('esAirAmt'))||0, cash=parseFloat(cuVal('esAirCash'))||0;
+    if(amt<=0){ toast('Enter the airtime amount','bad'); return; }
+    if(cash<0){ toast('Cash back cannot be negative','bad'); return; }
+    const platform=cuVal('esAirPlat')||s.airtime.platform;
+    s.airtime={ amount:amt, cashback:cash, platform:platform };
+    s.total=+(amt+cash).toFixed(2); s.date=date; s.staff=staff; s.note='Airtime · '+platform;
+    saveS(); closeModal(); rerender(); toast('Airtime sale updated · '+money(s.total),'good');
+    return;
+  }
 
   if(!(s.items && s.items.length)){
     const total=parseFloat(cuVal('esTotal'))||0;
@@ -2707,8 +3024,9 @@ function restoreJSON(input){ const f=input.files[0]; if(!f)return; const rd=new 
     }, 'Restore', true);
   }catch(e){ toast('That file could not be read','bad'); } }; rd.readAsText(f); }
 function exportCSV(){
-  const rows=[['Date','Time','Type','Item / Detail','Category','Unit','Qty','Unit price','Amount','Staff','Note','Channel','Charge']];
+  const rows=[['Date','Time','Type','Item / Detail','Category','Unit','Qty','Unit price','Amount','Staff','Note','Channel','Charge','Airtime card','Cash back','Platform']];
   [...store.sales].sort((a,b)=>a.ts-b.ts).forEach(s=>{ const t=new Date(s.ts).toLocaleTimeString('en-NG',{hour:'2-digit',minute:'2-digit'});
+    if(s.airtime){ rows.push([s.date,t,'Airtime',s.note||'Airtime','','','','',s.total,s.staff||'','',s.channel||'','',s.airtime.amount,s.airtime.cashback,s.airtime.platform]); return; }
     if(!s.items||!s.items.length){ rows.push([s.date,t,'Sale',s.note||'Cash sale','','','','',s.total,s.staff||'',s.backfill?'catch-up':(s.quick?'total entry':''),s.channel||'',s.charge||'']); return; }
     s.items.forEach(it=>rows.push([s.date,t,'Sale',it.name,'',it.unit||'pcs',it.qty,it.price,it.sub,s.staff||'',s.note||'',s.channel||'',s.charge||''])); });
   store.purchases.slice().sort((a,b)=>a.ts-b.ts).forEach(p=>rows.push([p.date,'','Purchase',p.desc||'Stock',p.supplier||'','','','',p.amount,'',p.stockNote||(p.backfill?'catch-up':''),'','']));

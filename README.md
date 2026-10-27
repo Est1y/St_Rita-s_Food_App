@@ -10,17 +10,22 @@ Makinson Plaza, Opp St. David Agboyin Primary School, Ogbomoso, Oyo State.
 
 - **Sell** — record item by item, or just a total when catching up later.
   Each sale is tagged with a **Type of Sales** (Main cash, Pure water, Jinja,
-  Iru Soap, Drink, POS, Transfer sales). POS and transfer sales can carry a charge.
+  Iru Soap, Drink, POS, Transfer sales, Home purchase). POS and transfer sales can carry a charge.
+- **Airtime** — card amount sold plus the cash back earned, and the platform
+  it went through (Moniepoint or Opay). The sale total is card + cash back.
 - **Money Out** — stock purchases with cost, supplier and proposed selling prices,
-  plus running expenses.
+  plus running expenses. Each stock-in can carry an **expiry date**; the Home
+  screen warns about anything expiring within 3 months.
 - **Jinja / Drink / Pure water** sales are deducted from the purchase record
   automatically, so the purchase log shows what was bought, what has sold off
   and what is left.
 - **Reports** — daily, weekly and monthly summaries with profit per item.
-- **Debt list** — who is owing, for what, and how much; mark paid when settled.
+- **Debt list** — who is owing, for what, how much and since when; a customer
+  dropdown, a total per customer, and Download / Print. The day view shows
+  the debts given and paid back on that day.
 - **Customer contacts** — names, phone numbers and emails.
 - **Items** — prices, cost, stock counts. Tap an item's name for its full
-  history: every sale and every purchase of it.
+  history: every sale and every purchase of it. The list can be downloaded or printed.
 
 ## Running it
 
